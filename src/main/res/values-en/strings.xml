@@ -146,11 +146,11 @@
 
     <!-- Terminal Target Selection -->
     <string name="terminal_target_title">Execution Target</string>
-    <string name="terminal_target_desc">Where commands run. A remote SSH host moves the work onto a real Linux machine; the local environment runs through proot and is markedly slower.</string>
+    <string name="terminal_target_desc">Where commands run. A remote SSH host moves the work onto a real Linux machine; the local target boots an Alpine VM with its own kernel inside the app and can run containers.</string>
     <string name="terminal_target_remote">Remote SSH host</string>
     <string name="terminal_target_remote_desc">Sessions run directly on an SSH channel; host and authentication must be filled in first</string>
-    <string name="terminal_target_local">Local Ubuntu environment</string>
-    <string name="terminal_target_local_desc">No network needed, but every command goes through proot and heavy work is slow</string>
+    <string name="terminal_target_local">Local Linux VM</string>
+    <string name="terminal_target_local_desc">Alpine on an in-app QEMU VM with its own kernel, so podman and friends work; the first boot takes tens of seconds and emulation makes heavy work slow</string>
     <string name="terminal_target_selected">Currently in use</string>
 
     <!-- Known Hosts -->

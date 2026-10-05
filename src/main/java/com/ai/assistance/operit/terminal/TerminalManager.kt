@@ -46,6 +46,7 @@ import com.ai.assistance.operit.terminal.provider.filesystem.LocalFileSystemProv
 import com.ai.assistance.operit.terminal.provider.filesystem.PRootBindMount
 import com.ai.assistance.operit.terminal.provider.filesystem.PRootMountMapping
 import com.ai.assistance.operit.terminal.provider.type.HiddenExecResult
+import com.ai.assistance.operit.terminal.vm.VmTerminalProvider
 import com.ai.assistance.operit.terminal.provider.type.TerminalProvider
 import com.ai.assistance.operit.terminal.provider.type.TerminalType
 import com.ai.assistance.operit.terminal.provider.type.LocalTerminalProvider
@@ -216,8 +217,14 @@ class TerminalManager private constructor(
             initializeSession(newSession.id)
         }
 
-        // 等待会话初始化完成
-        val success = withTimeoutOrNull(30000) { // 30秒超时
+        // 等待会话初始化完成。
+        //
+        // 本地目标现在是应用内启动的虚拟机：冷启动要装资产、格式化持久盘、等 guest 把
+        // OpenRC 服务全部拉起（参照实现上冷启动约 90 秒），30 秒对它不够。远端目标只是
+        // 建一条 SSH 通道，保持原来的界限即可。VM 的启动阶段由 QemuVmEngine 的 state
+        // 单独暴露，后续接进度提示时读那一份，不再靠这个超时。
+        val initTimeoutMs = if (_activeTarget.value == TerminalTarget.LOCAL) 240_000L else 30_000L
+        val success = withTimeoutOrNull(initTimeoutMs) {
             terminalState.first { state ->
                 val session = state.sessions.find { it.id == newSession.id }
                 session?.initState == com.ai.assistance.operit.terminal.data.SessionInitState.READY
@@ -225,7 +232,7 @@ class TerminalManager private constructor(
         }
 
         if (success == null) {
-            Log.e(TAG, "Session initialization timeout for session: ${newSession.id}")
+            Log.e(TAG, "Session initialization timeout for session: ${newSession.id} (${initTimeoutMs}ms)")
             // 初始化失败，移除会话
             sessionManager.closeSession(newSession.id)
             throw Exception("Session initialization timeout")
@@ -470,12 +477,18 @@ class TerminalManager private constructor(
 
     private fun initializeSession(sessionId: String) {
         coroutineScope.launch {
-            // 远端目标不需要本地环境：跳过 rootfs 解压与 common.sh 生成，
-            // 这正是远端方案相对本地 proot 的主要收益之一。
+            // 远端目标不需要本地环境。本地目标现在是应用内启动的 VM：它的"环境准备"
+            // 就是 provider 的连接过程（安装资产、起 QEMU、初始化 guest、建 SSH 连接），
+            // 因此这里只负责保证 provider 已连接，不再解压 rootfs、不再生成 common.sh。
             val ready =
                 when (_activeTarget.value) {
                     TerminalTarget.REMOTE -> true
-                    TerminalTarget.LOCAL -> initializeEnvironment()
+                    TerminalTarget.LOCAL ->
+                        runCatching { getTerminalProvider() }
+                            .onFailure { error ->
+                                Log.e(TAG, "Failed to prepare the local VM environment", error)
+                            }
+                            .isSuccess
                 }
             if (ready) {
                 startSession(sessionId)
@@ -614,8 +627,11 @@ class TerminalManager private constructor(
                             SSHTerminalProvider(context, sshConfig, this)
                         }
                         TerminalTarget.LOCAL -> {
-                            Log.d(TAG, "Creating singleton local terminal provider")
-                            LocalTerminalProvider(context)
+                            // 本地目标改为应用内启动的 Alpine 虚拟机（QEMU/TCG）。
+                            // proot 实现保留在树里但不再被选中：它的退役节奏见
+                            // docs/TODO/podroid_vm_20261005 的决策 P8。
+                            Log.d(TAG, "Creating singleton local VM terminal provider")
+                            VmTerminalProvider(context)
                         }
                     }
                 provider.connect().getOrThrow()
@@ -688,6 +704,30 @@ class TerminalManager private constructor(
      */
     fun forgetHostKeys(host: String) = sshFileConnectionManager.forgetHostKeys(host)
 
+    /**
+     * 保证当前目标可用。
+     *
+     * 远端目标检查是否已有可用的主机配置；本地目标是应用内启动的 VM，"可用"意味着
+     * VM 已经起来、guest 已初始化、SSH 连接已建立。MCP 共享会话这类"先初始化再建会话"
+     * 的调用点用它，取代以前直接调 proot 的 [initializeEnvironment]。
+     */
+    suspend fun ensureTargetConnected(): Boolean {
+        return when (_activeTarget.value) {
+            TerminalTarget.REMOTE ->
+                sshConfigManager.getConfig()?.let { sshConfigManager.isEnabled() } == true
+            TerminalTarget.LOCAL ->
+                runCatching { getTerminalProvider() }
+                    .onFailure { error -> Log.e(TAG, "Failed to prepare the local VM", error) }
+                    .isSuccess
+        }
+    }
+
+    /**
+     * proot 本地环境的环境准备。
+     *
+     * 本地目标已改为 VM，这个方法不再被任何入口调用；保留是因为 proot 的 provider 与
+     * 已发布用户的本地环境数据还在（退役节奏见 docs/TODO/podroid_vm_20261005 决策 P8）。
+     */
     suspend fun initializeEnvironment(): Boolean {
         if (isEnvInitialized) {
             return withContext(Dispatchers.IO) {
@@ -1504,17 +1544,20 @@ $prootBindSetup
         executorKey: String = "default",
         timeoutMs: Long = 120000L
     ): HiddenExecResult {
-        // 隐藏执行在远端目标下走 SSH exec 通道，不需要本地环境：这里若照旧解压 rootfs，
-        // 远端用户第一次执行工具命令就会付出几十兆解包与 common.sh 生成的代价，
-        // 而这些文件在远端目标下一个都不会被用到。
+        // 隐藏执行：远端目标走 SSH exec 通道；本地目标走 guest 自带的 dropbear，
+        // 两者都不需要本地 rootfs。这里若照旧解压 rootfs，用户第一次执行工具命令
+        // 就会付出几十兆解包与 common.sh 生成的代价，而 VM 路径下这些文件一个都不用。
         if (_activeTarget.value == TerminalTarget.LOCAL) {
-            val initialized = initializeEnvironment()
-            if (!initialized) {
+            val prepared =
+                runCatching { getTerminalProvider() }
+                    .onFailure { error -> Log.e(TAG, "Failed to prepare the local VM", error) }
+                    .isSuccess
+            if (!prepared) {
                 return HiddenExecResult(
                     output = "",
                     exitCode = -1,
                     state = HiddenExecResult.State.SHELL_START_FAILED,
-                    error = "Terminal environment initialization failed"
+                    error = "Local VM is not available"
                 )
             }
         }

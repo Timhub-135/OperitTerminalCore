@@ -146,11 +146,11 @@
 
     <!-- Terminal Target Selection -->
     <string name="terminal_target_title">执行目标</string>
-    <string name="terminal_target_desc">决定命令在哪里执行。远端 SSH 主机把负载放到真正的 Linux 机器上，本地环境走 proot，速度明显更慢。</string>
+    <string name="terminal_target_desc">决定命令在哪里执行。远端 SSH 主机把负载放到真正的 Linux 机器上；本地目标在应用内启动一台自带内核的 Alpine 虚拟机，可以跑容器。</string>
     <string name="terminal_target_remote">远端 SSH 主机</string>
     <string name="terminal_target_remote_desc">会话直接建立在 SSH 通道上，需要先填写主机与认证信息</string>
-    <string name="terminal_target_local">本地 Ubuntu 环境</string>
-    <string name="terminal_target_local_desc">不依赖网络，但所有命令都要穿过 proot，重负载明显偏慢</string>
+    <string name="terminal_target_local">本地 Linux 虚拟机</string>
+    <string name="terminal_target_local_desc">应用内以 QEMU 启动 Alpine（自带内核，支持 podman 等容器）；首次启动需要几十秒，软件模拟下重负载偏慢</string>
     <string name="terminal_target_selected">当前使用中</string>
 
     <!-- Known Hosts -->

@@ -20,3 +20,10 @@ libs/
 # OS generated files
 .DS_Store
 Thumbs.db 
+
+# VM assets: assembled at build time from the Podroid release APK by the
+# fetchVmAssets task (see build.gradle.kts). The squashfs alone is 213 MB, over
+# GitHub's per-file limit, and the repository should not carry the binaries.
+src/main/assets/vm/
+src/main/jniLibs/arm64-v8a/libqemu-system-aarch64.so
+src/main/jniLibs/arm64-v8a/libslirp.so
