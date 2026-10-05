@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** VM 的运行参数 */
@@ -69,6 +71,16 @@ class QemuVmEngine private constructor(private val context: Context) {
         /** 串口日志的滚动检测窗口 */
         private const val MARKER_WINDOW = 8192
 
+        /**
+         * 启动失败后的冷却时间。
+         *
+         * 启动一个起不来的 VM 会依次做资产校验、建持久盘、拉子进程，代价不小；而
+         * "打开终端""执行工具""MCP 建会话"这些入口都会去要 provider，失败时每个入口
+         * 都会重试一遍。没有冷却时实测在一秒多里连拉了四次 QEMU，日志被刷满。
+         * 冷却期内直接返回上次的失败原因，真实重试（用户重新操作）在冷却后照常进行。
+         */
+        private const val FAILURE_COOLDOWN_MS = 15_000L
+
         @Volatile private var instance: QemuVmEngine? = null
 
         fun getInstance(context: Context): QemuVmEngine =
@@ -79,6 +91,12 @@ class QemuVmEngine private constructor(private val context: Context) {
 
     private val paths = VmPaths(context)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** 同一时刻只允许一次启动尝试，避免多个入口并发拉起同一个 VM */
+    private val startMutex = Mutex()
+
+    /** 上次失败的时间与原因，用于冷却期内快速返回 */
+    @Volatile private var lastFailure: Pair<Long, String>? = null
 
     private val _state = MutableStateFlow(VmState())
     val state: StateFlow<VmState> = _state.asStateFlow()
@@ -108,26 +126,35 @@ class QemuVmEngine private constructor(private val context: Context) {
         config: VmConfig,
         timeoutMs: Long = 180_000L,
         onProgress: (VmAssets.Progress) -> Unit = {}
-    ): Result<Unit> {
+    ): Result<Unit> = startMutex.withLock {
         if (isRunning) {
             Log.d(TAG, "VM already running")
-            return awaitReady(timeoutMs)
+            return@withLock awaitReady(timeoutMs)
+        }
+
+        lastFailure?.let { (at, reason) ->
+            val elapsed = System.currentTimeMillis() - at
+            if (elapsed < FAILURE_COOLDOWN_MS) {
+                Log.d(TAG, "VM start skipped, last failure was ${elapsed}ms ago")
+                return@withLock Result.failure(IllegalStateException(reason))
+            }
         }
 
         VmAssets.ensureInstalled(context, paths, onProgress).onFailure { error ->
-            _state.value = VmState(running = false, stage = VmBootStage.FAILED, error = error.message ?: "assets")
-            return Result.failure(error)
+            recordFailure(error.message ?: "assets")
+            return@withLock Result.failure(error)
         }
 
         ensureStorage(config.storageSizeBytes).onFailure { error ->
-            _state.value = VmState(running = false, stage = VmBootStage.FAILED, error = error.message ?: "storage")
-            return Result.failure(error)
+            recordFailure(error.message ?: "storage")
+            return@withLock Result.failure(error)
         }
 
-        return try {
+        try {
             paths.ensureDirectories()
             paths.clearStaleSockets()
             consoleTail.setLength(0)
+            paths.qemuLog.delete()
 
             val argv = buildCommand(config)
             Log.d(TAG, "Starting QEMU: ${argv.joinToString(" ")}")
@@ -149,13 +176,28 @@ class QemuVmEngine private constructor(private val context: Context) {
             readConsoleLog()
             monitorProcess(started)
 
-            awaitReady(timeoutMs)
+            val ready = awaitReady(timeoutMs)
+            if (ready.isSuccess) {
+                lastFailure = null
+            } else {
+                recordFailure(ready.exceptionOrNull()?.message ?: "VM did not become ready")
+            }
+            ready
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start QEMU", e)
             stop()
-            _state.value =
-                VmState(running = false, stage = VmBootStage.FAILED, error = e.message ?: "start failed")
+            val reason = e.message ?: "start failed"
+            recordFailure(reason)
             Result.failure(e)
+        }
+    }
+
+    /** 记下失败原因，供冷却期内的调用方直接拿到同一份说明 */
+    private fun recordFailure(reason: String) {
+        lastFailure = System.currentTimeMillis() to reason
+        val current = _state.value
+        if (current.stage != VmBootStage.FAILED) {
+            _state.value = current.copy(running = false, stage = VmBootStage.FAILED, error = reason)
         }
     }
 
@@ -352,17 +394,40 @@ class QemuVmEngine private constructor(private val context: Context) {
             }
             if (!stopping.get()) {
                 Log.w(TAG, "QEMU exited with code $code")
-                val tail = consoleTail.takeLast(400)
+                // QEMU 自己的输出比串口日志更能说明问题：动态链接失败、设备参数写错这类
+                // 情况根本走不到 guest，串口日志是空的，只有 qemu.log 里有原因
+                val qemuLogTail = readQemuLogTail()
+                val consoleTail = consoleTail.takeLast(400)
+                val detail =
+                    buildString {
+                        append("QEMU exited with code ").append(code)
+                        if (qemuLogTail.isNotBlank()) append("; qemu.log: ").append(qemuLogTail)
+                        if (consoleTail.isNotBlank()) append("; console: ").append(consoleTail)
+                    }
                 _state.value =
                     VmState(
                         running = false,
                         stage = VmBootStage.FAILED,
-                        error = "QEMU exited with code $code; console tail: $tail"
+                        error = detail
                     )
+                recordFailure(detail)
                 process = null
                 consoleJob?.cancel()
                 consoleJob = null
             }
+        }
+    }
+
+    /** 取 QEMU 自身输出的尾部，作为启动失败的诊断信息 */
+    private fun readQemuLogTail(maxChars: Int = 600): String {
+        return try {
+            if (!paths.qemuLog.isFile) return ""
+            val text = paths.qemuLog.readText()
+            val trimmed = text.trim()
+            if (trimmed.length <= maxChars) trimmed else trimmed.takeLast(maxChars)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read qemu.log", e)
+            ""
         }
     }
 
