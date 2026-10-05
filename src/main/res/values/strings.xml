@@ -28,8 +28,6 @@
     <string name="category_rust_desc">Rust 开发环境和包管理器</string>
     <string name="category_go_name">Go 环境</string>
     <string name="category_go_desc">Go 语言开发环境</string>
-    <string name="category_ssh_name">SSH 工具</string>
-    <string name="category_ssh_desc">SSH 客户端和密码认证工具</string>
     
     <!-- Package Items -->
     <string name="package_nodejs_name">Node.js</string>
@@ -52,10 +50,6 @@
     <string name="package_rust_desc">通过 rustup 安装 Rust 工具链</string>
     <string name="package_go_name">Go</string>
     <string name="package_go_desc">Go 编程语言</string>
-    <string name="package_ssh_client_name">SSH 客户端</string>
-    <string name="package_ssh_client_desc">SSH 连接客户端</string>
-    <string name="package_sshpass_name">sshpass</string>
-    <string name="package_sshpass_desc">SSH 密码认证工具</string>
     
     <!-- SettingsScreen -->
     <string name="settings_title">设置</string>
@@ -137,11 +131,33 @@
     <string name="ftp_server_running_info">FTP服务器正在运行\n地址: %1$s:%2$s\n用户名: %3$s\n密码: %4$s\n根目录: Ubuntu文件系统</string>
     <string name="unknown_session">未知会话</string>
     
-    <!-- SSH Tools Check -->
-    <string name="ssh_tools_missing_title">SSH 工具未安装</string>
-    <string name="ssh_tools_missing_message">启用 SSH 连接需要安装以下工具：\n\n• ssh - SSH 客户端\n• sshpass - SSH 密码认证工具\n\n请前往"环境配置"页面安装 SSH 工具。</string>
+    <!-- SSH Configuration Check -->
+    <string name="ssh_config_missing_title">SSH 未配置</string>
+    <string name="ssh_config_missing_message">启用 SSH 前请先填写主机、端口与认证信息。终端会话直接建立在 SSH 通道上，不再需要本地环境里的 ssh 与 sshpass。</string>
     <string name="go_to_setup">前往配置</string>
-    <string name="checking_ssh_tools">正在检查 SSH 工具...</string>
+
+    <!-- SSH Host Key Confirmation -->
+    <string name="host_key_unknown_title">确认主机密钥</string>
+    <string name="host_key_unknown_message">首次连接该主机。请核对下面的指纹与该主机 ssh-keygen -lf 的输出一致后再信任。</string>
+    <string name="host_key_mismatch_title">主机密钥已变化</string>
+    <string name="host_key_mismatch_message">该主机此前记录过另一把密钥，指纹不一致。这可能意味着服务器重装，也可能意味着中间人攻击，请先与服务器管理员核对。</string>
+    <string name="host_key_fingerprint_label">SHA-256 指纹</string>
+    <string name="host_key_trust">信任并继续</string>
+
+    <!-- Terminal Target Selection -->
+    <string name="terminal_target_title">执行目标</string>
+    <string name="terminal_target_desc">决定命令在哪里执行。远端 SSH 主机把负载放到真正的 Linux 机器上，本地环境走 proot，速度明显更慢。</string>
+    <string name="terminal_target_remote">远端 SSH 主机</string>
+    <string name="terminal_target_remote_desc">会话直接建立在 SSH 通道上，需要先填写主机与认证信息</string>
+    <string name="terminal_target_local">本地 Ubuntu 环境</string>
+    <string name="terminal_target_local_desc">不依赖网络，但所有命令都要穿过 proot，重负载明显偏慢</string>
+    <string name="terminal_target_selected">当前使用中</string>
+
+    <!-- Known Hosts -->
+    <string name="known_hosts_title">已知主机密钥</string>
+    <string name="known_hosts_summary">已信任 %1$d 台主机，可查看指纹并忘记</string>
+    <string name="known_hosts_empty">还没有信任过任何主机。首次连接时应用会展示指纹并请求确认。</string>
+    <string name="known_hosts_forget">忘记该主机</string>
     
     <!-- Shared TMP Settings -->
     <string name="shared_tmp_title">共享临时目录</string>
@@ -171,15 +187,6 @@
     <string name="ssh_reverse_mount_enabled">✓ 反向挂载已启用</string>
     <string name="ssh_reverse_mount_desc">远程可通过 ~/storage 和 ~/sdcard 访问本地文件</string>
     <string name="ssh_config_required">请先配置 SSH 连接信息</string>
-    <string name="openssh_missing_title">缺少 OpenSSH Server</string>
-    <string name="openssh_missing_desc">启用反向挂载需要安装以下组件：</string>
-    <string name="openssh_local_component">✓ 本地（Android）：openssh-server</string>
-    <string name="openssh_go_to_install">  → 请前往环境配置安装</string>
-    <string name="openssh_remote_component">✓ 远程服务器：sshfs</string>
-    <string name="openssh_remote_install">  → 在远程服务器执行：</string>
-    <string name="openssh_install_ubuntu_cmd">     apt install sshfs  # Ubuntu/Debian</string>
-    <string name="openssh_install_centos_cmd">     yum install fuse-sshfs  # CentOS/RHEL</string>
-    <string name="openssh_install_button">去安装 openssh-server</string>
     
     <!-- Font Settings -->
     <string name="font_settings_title">终端字体设置</string>

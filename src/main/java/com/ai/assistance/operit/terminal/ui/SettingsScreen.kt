@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.PlayArrow
@@ -28,6 +29,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ai.assistance.operit.terminal.data.TerminalTarget
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ai.assistance.operit.terminal.data.PackageManagerType
 import com.ai.assistance.operit.terminal.data.SourceConfig
@@ -93,8 +95,13 @@ fun SettingsScreen(
     // SSH配置相关状态（单一配置）
     val sshConfig by viewModel.sshConfig.collectAsState()
     val sshEnabled by viewModel.sshEnabled.collectAsState()
-    var showSshToolsMissingDialog by remember { mutableStateOf(false) }
-    var showOpensshMissingDialog by remember { mutableStateOf(false) }
+    var showSshConfigMissingDialog by remember { mutableStateOf(false) }
+
+    // 执行目标与已知主机
+    val activeTarget by viewModel.activeTarget.collectAsState()
+    val knownHosts by viewModel.knownHosts.collectAsState()
+    var showKnownHostsDialog by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { viewModel.refreshKnownHosts() }
     
     // 共享tmp设置状态
     val sharedTmpEnabled by viewModel.sharedTmpEnabled.collectAsState()
@@ -114,14 +121,9 @@ fun SettingsScreen(
     }
 
     // 当 ViewModel 通知显示对话框时，更新本地状态
-    val showSshToolsMissingDialogState by viewModel.showSshToolsMissingDialog.collectAsState()
-    LaunchedEffect(showSshToolsMissingDialogState) {
-        showSshToolsMissingDialog = showSshToolsMissingDialogState
-    }
-    
-    val showOpensshMissingDialogState by viewModel.showOpensshMissingDialog.collectAsState()
-    LaunchedEffect(showOpensshMissingDialogState) {
-        showOpensshMissingDialog = showOpensshMissingDialogState
+    val showSshConfigMissingDialogState by viewModel.showSshConfigMissingDialog.collectAsState()
+    LaunchedEffect(showSshConfigMissingDialogState) {
+        showSshConfigMissingDialog = showSshConfigMissingDialogState
     }
 
     Scaffold(
@@ -367,6 +369,72 @@ fun SettingsScreen(
                 }
             }
             
+            // 执行目标区域：决定命令跑在远端主机还是本地 proot 环境
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                colors = CardDefaults.cardColors(containerColor = SettingsTheme.surfaceColor)
+            ) {
+                Column {
+                    Text(
+                        text = context.getString(com.ai.assistance.operit.terminal.R.string.terminal_target_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = SettingsTheme.onSurfaceColor,
+                        modifier = Modifier.padding(start = 16.dp, top = 16.dp)
+                    )
+                    Text(
+                        text = context.getString(com.ai.assistance.operit.terminal.R.string.terminal_target_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SettingsTheme.onSurfaceColor.copy(alpha = 0.6f),
+                        modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 16.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    SettingsItem(
+                        title = context.getString(com.ai.assistance.operit.terminal.R.string.terminal_target_remote),
+                        subtitle =
+                            if (activeTarget == TerminalTarget.REMOTE) {
+                                context.getString(com.ai.assistance.operit.terminal.R.string.terminal_target_selected)
+                            } else {
+                                context.getString(com.ai.assistance.operit.terminal.R.string.terminal_target_remote_desc)
+                            },
+                        onClick = { viewModel.setActiveTarget(TerminalTarget.REMOTE) },
+                        icon =
+                            if (activeTarget == TerminalTarget.REMOTE) {
+                                Icons.Default.Check
+                            } else {
+                                Icons.Default.ChevronRight
+                            }
+                    )
+                    SettingsItem(
+                        title = context.getString(com.ai.assistance.operit.terminal.R.string.terminal_target_local),
+                        subtitle =
+                            if (activeTarget == TerminalTarget.LOCAL) {
+                                context.getString(com.ai.assistance.operit.terminal.R.string.terminal_target_selected)
+                            } else {
+                                context.getString(com.ai.assistance.operit.terminal.R.string.terminal_target_local_desc)
+                            },
+                        onClick = { viewModel.setActiveTarget(TerminalTarget.LOCAL) },
+                        icon =
+                            if (activeTarget == TerminalTarget.LOCAL) {
+                                Icons.Default.Check
+                            } else {
+                                Icons.Default.ChevronRight
+                            }
+                    )
+                    HorizontalDivider(color = SettingsTheme.backgroundColor)
+                    SettingsItem(
+                        title = context.getString(com.ai.assistance.operit.terminal.R.string.known_hosts_title),
+                        subtitle =
+                            context.getString(
+                                com.ai.assistance.operit.terminal.R.string.known_hosts_summary,
+                                knownHosts.size
+                            ),
+                        onClick = { showKnownHostsDialog = true }
+                    )
+                }
+            }
+
             // SSH配置区域
             Card(
                 modifier = Modifier
@@ -761,27 +829,85 @@ fun SettingsScreen(
         }
     }
     
-    if (showSshToolsMissingDialog) {
+    // 已知主机：查看与忘记，忘记后下次连接会重新询问指纹
+    if (showKnownHostsDialog) {
         AlertDialog(
-            onDismissRequest = { viewModel.onSshToolsMissingDialogDismissed() },
+            onDismissRequest = { showKnownHostsDialog = false },
+            title = {
+                Text(
+                    text = context.getString(com.ai.assistance.operit.terminal.R.string.known_hosts_title),
+                    color = SettingsTheme.onSurfaceColor,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                if (knownHosts.isEmpty()) {
+                    Text(
+                        text = context.getString(com.ai.assistance.operit.terminal.R.string.known_hosts_empty),
+                        color = SettingsTheme.onSurfaceColor
+                    )
+                } else {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        knownHosts.forEach { entry ->
+                            Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                                Text(
+                                    text = entry.host,
+                                    color = SettingsTheme.onSurfaceColor,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = entry.keyType,
+                                    color = SettingsTheme.onSurfaceVariant,
+                                    fontSize = 12.sp
+                                )
+                                Text(
+                                    text = entry.fingerprintSha256,
+                                    color = SettingsTheme.onSurfaceVariant,
+                                    fontSize = 11.sp,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                )
+                                TextButton(onClick = { viewModel.forgetHostKeys(entry.host) }) {
+                                    Text(
+                                        text = context.getString(com.ai.assistance.operit.terminal.R.string.known_hosts_forget),
+                                        color = SettingsTheme.primaryColor
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = SettingsTheme.backgroundColor)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showKnownHostsDialog = false }) {
+                    Text(context.getString(com.ai.assistance.operit.terminal.R.string.confirm))
+                }
+            },
+            containerColor = SettingsTheme.surfaceColor
+        )
+    }
+
+    if (showSshConfigMissingDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.onSshConfigMissingDialogDismissed() },
             title = { 
                 Text(
-                    text = context.getString(com.ai.assistance.operit.terminal.R.string.ssh_tools_missing_title), 
+                    text = context.getString(com.ai.assistance.operit.terminal.R.string.ssh_config_missing_title), 
                     color = SettingsTheme.onSurfaceColor, 
                     fontWeight = FontWeight.Bold
                 ) 
             },
             text = { 
                 Text(
-                    text = context.getString(com.ai.assistance.operit.terminal.R.string.ssh_tools_missing_message), 
+                    text = context.getString(com.ai.assistance.operit.terminal.R.string.ssh_config_missing_message), 
                     color = SettingsTheme.onSurfaceColor
                 ) 
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.onSshToolsMissingDialogDismissed()
-                        onBack() // 返回上一页，方便用户去环境配置
+                        viewModel.onSshConfigMissingDialogDismissed()
+                        onBack() // 返回上一页，方便用户去填写 SSH 连接信息
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = SettingsTheme.primaryColor)
                 ) {
@@ -790,7 +916,7 @@ fun SettingsScreen(
             },
             dismissButton = {
                 OutlinedButton(
-                    onClick = { viewModel.onSshToolsMissingDialogDismissed() }
+                    onClick = { viewModel.onSshConfigMissingDialogDismissed() }
                 ) {
                     Text(context.getString(com.ai.assistance.operit.terminal.R.string.dialog_cancel))
                 }
@@ -798,82 +924,6 @@ fun SettingsScreen(
             containerColor = SettingsTheme.surfaceColor
         )
     }
-    
-    if (showOpensshMissingDialog) {
-        AlertDialog(
-            onDismissRequest = { viewModel.onOpensshMissingDialogDismissed() },
-            title = { 
-                Text(
-                    text = context.getString(com.ai.assistance.operit.terminal.R.string.openssh_missing_title), 
-                    color = SettingsTheme.onSurfaceColor, 
-                    fontWeight = FontWeight.Bold
-                ) 
-            },
-            text = { 
-                Column {
-                    Text(
-                        text = context.getString(com.ai.assistance.operit.terminal.R.string.openssh_missing_desc), 
-                        color = SettingsTheme.onSurfaceColor,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = context.getString(com.ai.assistance.operit.terminal.R.string.openssh_local_component),
-                        color = SettingsTheme.primaryColor,
-                        fontSize = 14.sp
-                    )
-                    Text(
-                        text = context.getString(com.ai.assistance.operit.terminal.R.string.openssh_go_to_install),
-                        color = SettingsTheme.onSurfaceVariant,
-                        fontSize = 12.sp
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = context.getString(com.ai.assistance.operit.terminal.R.string.openssh_remote_component),
-                        color = SettingsTheme.primaryColor,
-                        fontSize = 14.sp
-                    )
-                    Text(
-                        text = context.getString(com.ai.assistance.operit.terminal.R.string.openssh_remote_install),
-                        color = SettingsTheme.onSurfaceVariant,
-                        fontSize = 12.sp
-                    )
-                    Text(
-                        text = context.getString(com.ai.assistance.operit.terminal.R.string.openssh_install_ubuntu_cmd),
-                        color = SettingsTheme.onSurfaceVariant,
-                        fontSize = 11.sp,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                    )
-                    Text(
-                        text = context.getString(com.ai.assistance.operit.terminal.R.string.openssh_install_centos_cmd),
-                        color = SettingsTheme.onSurfaceVariant,
-                        fontSize = 11.sp,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.onOpensshMissingDialogDismissed()
-                        onBack() // 返回上一页，方便用户去环境配置
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = SettingsTheme.primaryColor)
-                ) {
-                    Text(context.getString(com.ai.assistance.operit.terminal.R.string.openssh_install_button))
-                }
-            },
-            dismissButton = {
-                OutlinedButton(
-                    onClick = { viewModel.onOpensshMissingDialogDismissed() }
-                ) {
-                    Text(context.getString(com.ai.assistance.operit.terminal.R.string.cancel))
-                }
-            },
-            containerColor = SettingsTheme.surfaceColor
-        )
-    }
-
     // 字体大小设置对话框
     if (showFontSizeDialog) {
         var fontSizeInput by remember { mutableStateOf(fontSize.toInt().toString()) }

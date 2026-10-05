@@ -8,7 +8,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.ai.assistance.operit.terminal.data.PendingHostKey
 import com.ai.assistance.operit.terminal.data.TerminalSessionData
+import com.ai.assistance.operit.terminal.data.TerminalTarget
 import kotlinx.coroutines.launch
 import android.util.Log
 import com.ai.assistance.operit.terminal.view.domain.ansi.AnsiTerminalEmulator
@@ -20,6 +22,9 @@ class TerminalEnv(
     currentDirectoryState: State<String>,
     isFullscreenState: State<Boolean>,
     terminalEmulatorState: State<AnsiTerminalEmulator>,
+    pendingHostKeyState: State<PendingHostKey?>,
+    activeTargetState: State<TerminalTarget>,
+    needsSshConfigurationState: State<Boolean>,
     private val terminalManager: TerminalManager,
     val forceShowSetup: Boolean = false
 ) {
@@ -28,6 +33,17 @@ class TerminalEnv(
     val currentDirectory by currentDirectoryState
     val isFullscreen by isFullscreenState
     val terminalEmulator by terminalEmulatorState
+
+    /**
+     * 等待用户确认的主机密钥；非空时由界面弹出指纹确认框。
+     */
+    val pendingHostKey by pendingHostKeyState
+
+    /** 当前执行目标：远端 SSH 或本地 proot 环境 */
+    val activeTarget by activeTargetState
+
+    /** 远端目标缺少主机配置时为 true，界面据此引导用户去填写 */
+    val needsSshConfiguration by needsSshConfigurationState
 
     var command by mutableStateOf("")
 
@@ -72,6 +88,18 @@ class TerminalEnv(
     }
     fun onSwitchSession(sessionId: String) = terminalManager.switchToSession(sessionId)
     fun onCloseSession(sessionId: String) = terminalManager.closeSession(sessionId)
+
+    /** 用户核对指纹后信任该主机密钥，并重试被中断的会话 */
+    fun onTrustPendingHostKey() = terminalManager.trustPendingHostKey()
+
+    /** 用户拒绝信任，保持未连接 */
+    fun onDismissPendingHostKey() = terminalManager.dismissPendingHostKey()
+
+    /** 切换执行目标（远端 / 本地），会关闭现有会话 */
+    fun onSelectTarget(target: TerminalTarget) = terminalManager.setActiveTarget(target)
+
+    /** 收起“缺少主机配置”的引导 */
+    fun onDismissSshConfigurationRequest() = terminalManager.dismissSshConfigurationRequest()
     
     fun saveScrollOffset(sessionId: String, scrollOffset: Float) = terminalManager.saveScrollOffset(sessionId, scrollOffset)
     fun getScrollOffset(sessionId: String): Float = terminalManager.getScrollOffset(sessionId)
@@ -83,6 +111,10 @@ fun rememberTerminalEnv(terminalManager: TerminalManager, forceShowSetup: Boolea
     val currentSessionIdState = terminalManager.currentSessionId.collectAsState(initial = null)
     val currentDirectoryState = terminalManager.currentDirectory.collectAsState(initial = "$ ")
     val isFullscreenState = terminalManager.isFullscreen.collectAsState(initial = false)
+    val pendingHostKeyState = terminalManager.pendingHostKey.collectAsState(initial = null)
+    val activeTargetState = terminalManager.activeTarget.collectAsState(initial = TerminalTarget.REMOTE)
+    val needsSshConfigurationState =
+        terminalManager.needsSshConfiguration.collectAsState(initial = false)
     val placeholderEmulator = remember { AnsiTerminalEmulator(screenWidth = 1, screenHeight = 1, historySize = 0) }
     val terminalEmulatorState = terminalManager.terminalEmulator.collectAsState(initial = placeholderEmulator)
 
@@ -93,6 +125,9 @@ fun rememberTerminalEnv(terminalManager: TerminalManager, forceShowSetup: Boolea
             currentDirectoryState = currentDirectoryState,
             isFullscreenState = isFullscreenState,
             terminalEmulatorState = terminalEmulatorState,
+            pendingHostKeyState = pendingHostKeyState,
+            activeTargetState = activeTargetState,
+            needsSshConfigurationState = needsSshConfigurationState,
             terminalManager = terminalManager,
             forceShowSetup = forceShowSetup
         )

@@ -8,6 +8,7 @@ import com.ai.assistance.operit.terminal.Pty
 import com.ai.assistance.operit.terminal.TerminalSession
 import com.ai.assistance.operit.terminal.provider.filesystem.FileSystemProvider
 import com.ai.assistance.operit.terminal.provider.filesystem.LocalFileSystemProvider
+import com.ai.assistance.operit.terminal.transport.LocalPtyTransport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -82,7 +83,7 @@ class LocalTerminalProvider(
         hiddenExecScope.cancel()
     }
 
-    override suspend fun startSession(sessionId: String): Result<Pair<TerminalSession, Pty>> {
+    override suspend fun startSession(sessionId: String): Result<TerminalSession> {
         return withContext(Dispatchers.IO) {
             try {
                 val command = buildVisibleSessionCommand()
@@ -93,14 +94,10 @@ class LocalTerminalProvider(
 
                 val pty = Pty.start(command, env, filesDir)
 
-                val session = TerminalSession(
-                    process = pty.process,
-                    stdout = pty.stdout,
-                    stdin = pty.stdin
-                )
+                val session = TerminalSession(LocalPtyTransport(pty))
 
                 activeSessions[sessionId] = session
-                Result.success(Pair(session, pty))
+                Result.success(session)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start local terminal session", e)
                 Result.failure(e)
@@ -110,7 +107,7 @@ class LocalTerminalProvider(
 
     override suspend fun closeSession(sessionId: String) {
         activeSessions[sessionId]?.let { session ->
-            session.process.destroy()
+            session.transport.destroy()
             activeSessions.remove(sessionId)
             Log.d(TAG, "Closed local terminal session: $sessionId")
         }

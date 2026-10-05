@@ -11,14 +11,23 @@ import kotlinx.coroutines.launch
 import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.map
 import com.ai.assistance.operit.terminal.data.TerminalState
 import com.ai.assistance.operit.terminal.data.CommandHistoryItem
+import com.ai.assistance.operit.terminal.data.PendingHostKey
+import com.ai.assistance.operit.terminal.data.SshTargetNotConfiguredException
+import com.ai.assistance.operit.terminal.data.TerminalTarget
 import com.ai.assistance.operit.terminal.data.QueuedCommand
+import com.ai.assistance.operit.terminal.utils.HostKeyStore
+import com.ai.assistance.operit.terminal.utils.HostKeyVerificationException
+import com.ai.assistance.operit.terminal.utils.SSHFileConnectionManager
 import com.ai.assistance.operit.terminal.view.domain.OutputProcessor
 import java.util.UUID
 import kotlinx.coroutines.SupervisorJob
@@ -83,6 +92,31 @@ class TerminalManager private constructor(
     private val sourceManager = SourceManager(context)
     private val sshConfigManager = SSHConfigManager(context)
     private val sshdServerManager = SSHDServerManager.getInstance(context)
+    private val sshFileConnectionManager = SSHFileConnectionManager.getInstance(context)
+
+    /**
+     * 待确认的主机密钥。
+     *
+     * 连接失败后由 UI 展示指纹，用户确认后才写入 known_hosts 并重试会话；
+     * 不在连接层自动信任未知主机。
+     */
+    private val _pendingHostKey = MutableStateFlow<PendingHostKey?>(null)
+    val pendingHostKey: StateFlow<PendingHostKey?> = _pendingHostKey.asStateFlow()
+
+    /**
+     * 当前执行目标。
+     *
+     * 默认是远端 SSH：新安装不再自动解压并进入本地 proot 环境。
+     * 已经装好本地环境的安装保持本地目标，升级不会把命令悄悄换到别处执行。
+     */
+    private val _activeTarget = MutableStateFlow(loadActiveTarget())
+    val activeTarget: StateFlow<TerminalTarget> = _activeTarget.asStateFlow()
+
+    /**
+     * 远端目标缺少主机配置时置位，由界面引导用户去填写。
+     */
+    private val _needsSshConfiguration = MutableStateFlow(false)
+    val needsSshConfiguration: StateFlow<Boolean> = _needsSshConfiguration.asStateFlow()
     
     // 单例的 TerminalProvider
     private var terminalProvider: TerminalProvider? = null
@@ -118,7 +152,10 @@ class TerminalManager private constructor(
         }
 
         private const val TAG = "TerminalManager"
-        private const val UBUNTU_FILENAME = "ubuntu-noble-aarch64-pd-v4.18.0.tar.xz"
+        private const val UBUNTU_FILENAME = "ubuntu-noble-aarch64-pd-v4.19.0.tar.xz"
+
+        /** 执行目标在 terminal_settings 中的键，缺省时按是否已装本地环境推断 */
+        private const val KEY_ACTIVE_TARGET = "active_target"
         private const val MAX_HISTORY_ITEMS = 500
         private const val MAX_OUTPUT_LINES_PER_ITEM = 1000
         private const val TERMINAL_ENTER = "\r"
@@ -155,12 +192,22 @@ class TerminalManager private constructor(
     suspend fun createNewSession(
         title: String? = null
     ): TerminalSessionData {
-        // 自动检测终端类型
-        val terminalType = if (sshConfigManager.getConfig() != null && sshConfigManager.isEnabled()) {
-            TerminalType.SSH
-        } else {
-            TerminalType.LOCAL
+        // 远端目标缺少配置时立刻失败并请求界面引导，
+        // 否则要等满 30 秒的会话初始化超时才报错，用户只会看到“卡住”。
+        if (_activeTarget.value == TerminalTarget.REMOTE) {
+            val sshConfig = sshConfigManager.getConfig()
+            if (sshConfig == null || !sshConfigManager.isEnabled()) {
+                _needsSshConfiguration.value = true
+                throw SshTargetNotConfiguredException()
+            }
         }
+
+        // 目标决定会话类型：远端走 SSH 通道，本地走 proot Ubuntu
+        val terminalType =
+            when (_activeTarget.value) {
+                TerminalTarget.REMOTE -> TerminalType.SSH
+                TerminalTarget.LOCAL -> TerminalType.LOCAL
+            }
         
         val newSession = sessionManager.createNewSession(title, terminalType)
 
@@ -423,8 +470,14 @@ class TerminalManager private constructor(
 
     private fun initializeSession(sessionId: String) {
         coroutineScope.launch {
-            val success = initializeEnvironment()
-            if (success) {
+            // 远端目标不需要本地环境：跳过 rootfs 解压与 common.sh 生成，
+            // 这正是远端方案相对本地 proot 的主要收益之一。
+            val ready =
+                when (_activeTarget.value) {
+                    TerminalTarget.REMOTE -> true
+                    TerminalTarget.LOCAL -> initializeEnvironment()
+                }
+            if (ready) {
                 startSession(sessionId)
             }
         }
@@ -441,7 +494,8 @@ class TerminalManager private constructor(
 
                 // 启动终端会话
                 val result = provider.startSession(sessionId)
-                val (terminalSession, pty) = result.getOrThrow()
+                val terminalSession = result.getOrThrow()
+                val pty = terminalSession.pty
                 val sessionWriter = terminalSession.stdin.writer()
 
                 // 启动读取协程
@@ -466,8 +520,12 @@ class TerminalManager private constructor(
                         if (closingSessions.remove(sessionId)) {
                             return@launch
                         }
-                        if (reachedEof || !terminalSession.process.isAlive) {
-                            handleTerminalSessionExit(sessionId, terminalSession)
+                        // 退出处理要读退出码，属于挂起调用；放在 NonCancellable 里，
+                        // 否则协程一旦被取消，退出码与状态清理都会静默丢失。
+                        withContext(NonCancellable) {
+                            if (reachedEof || !terminalSession.transport.isAlive()) {
+                                handleTerminalSessionExit(sessionId, terminalSession)
+                            }
                         }
                     }
                 }
@@ -481,26 +539,46 @@ class TerminalManager private constructor(
                         readJob = readJob
                     )
                 }
+            } catch (e: HostKeyVerificationException) {
+                // 未知主机或指纹变化：交给 UI 展示指纹并等待用户确认，
+                // 不在连接层自动信任，否则主机密钥校验没有意义。
+                Log.w(TAG, "Session $sessionId blocked by host key verification", e)
+                _pendingHostKey.value = PendingHostKey(sessionId, e.challenge)
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting session", e)
             }
         }
     }
 
-    private fun handleTerminalSessionExit(sessionId: String, terminalSession: TerminalSession) {
+    /**
+     * 信任当前待确认的主机密钥，并重试触发它的会话。
+     */
+    fun trustPendingHostKey() {
+        val pending = _pendingHostKey.value ?: return
+        sshFileConnectionManager.trustHostKey(pending.challenge)
+        _pendingHostKey.value = null
+        initializeSession(pending.sessionId)
+    }
+
+    /**
+     * 拒绝当前待确认的主机密钥，保持未连接状态。
+     */
+    fun dismissPendingHostKey() {
+        _pendingHostKey.value = null
+    }
+
+    private suspend fun handleTerminalSessionExit(sessionId: String, terminalSession: TerminalSession) {
         if (sessionManager.getSession(sessionId) == null) {
             return
         }
 
+        // 退出码由传输提供：本地是 waitpid 的结果，远程是通道的 exit-status。
+        // 仍在存活时不等待，直接按 -1 呈现，避免在读取循环里阻塞。
         val exitCode =
-            if (terminalSession.process.isAlive) {
+            if (terminalSession.transport.isAlive()) {
                 -1
             } else {
-                runCatching { terminalSession.process.waitFor() }
-                    .getOrElse {
-                        Log.w(TAG, "Failed to read exit code for session $sessionId", it)
-                        -1
-                    }
+                terminalSession.transport.awaitExit() ?: -1
             }
 
         Log.i(TAG, "Terminal session $sessionId exited with code $exitCode")
@@ -522,20 +600,93 @@ class TerminalManager private constructor(
     private suspend fun getTerminalProvider(): TerminalProvider {
         providerMutex.withLock {
             if (terminalProvider == null) {
-                val sshConfig = sshConfigManager.getConfig()
-                val provider = if (sshConfig != null && sshConfigManager.isEnabled()) {
-                    Log.d(TAG, "Creating singleton SSH terminal provider")
-                    SSHTerminalProvider(context, sshConfig, this)
-                } else {
-                    Log.d(TAG, "Creating singleton local terminal provider")
-                    LocalTerminalProvider(context)
-                }
+                val provider =
+                    when (_activeTarget.value) {
+                        TerminalTarget.REMOTE -> {
+                            // 远端目标必须有可用的主机配置。这里不退回本地方案：
+                            // 静默切换会让用户以为命令在本机执行，实际发到了别处。
+                            val sshConfig = sshConfigManager.getConfig()
+                            if (sshConfig == null || !sshConfigManager.isEnabled()) {
+                                _needsSshConfiguration.value = true
+                                throw SshTargetNotConfiguredException()
+                            }
+                            Log.d(TAG, "Creating singleton SSH terminal provider")
+                            SSHTerminalProvider(context, sshConfig, this)
+                        }
+                        TerminalTarget.LOCAL -> {
+                            Log.d(TAG, "Creating singleton local terminal provider")
+                            LocalTerminalProvider(context)
+                        }
+                    }
                 provider.connect().getOrThrow()
                 terminalProvider = provider
+                _needsSshConfiguration.value = false
             }
         }
         return terminalProvider!!
     }
+
+    /**
+     * 读取当前执行目标。
+     *
+     * 没有存过值时按“是否已经装有本地环境”判定：装过就保持本地，
+     * 全新安装默认远端。这样升级不会改变老用户命令的执行位置。
+     */
+    private fun loadActiveTarget(): TerminalTarget {
+        prefs.getString(KEY_ACTIVE_TARGET, null)?.let { stored ->
+            return runCatching { TerminalTarget.valueOf(stored) }.getOrElse { error ->
+                Log.e(TAG, "Stored terminal target is invalid: $stored", error)
+                TerminalTarget.REMOTE
+            }
+        }
+
+        val localRootfs = File(filesDir, "usr/var/lib/proot-distro/installed-rootfs/ubuntu")
+        val initial =
+            if (localRootfs.isDirectory) TerminalTarget.LOCAL else TerminalTarget.REMOTE
+        prefs.edit().putString(KEY_ACTIVE_TARGET, initial.name).apply()
+        Log.i(TAG, "Initial terminal target resolved to $initial")
+        return initial
+    }
+
+    /**
+     * 切换执行目标。
+     *
+     * 目标改变后旧的 provider 与它的连接、文件系统都不再对应当前目标，
+     * 因此关闭已有会话并释放 provider；下次建会话时按新目标重建。
+     */
+    fun setActiveTarget(target: TerminalTarget) {
+        if (_activeTarget.value == target) {
+            return
+        }
+        Log.i(TAG, "Switching terminal target to $target")
+        prefs.edit().putString(KEY_ACTIVE_TARGET, target.name).apply()
+        _activeTarget.value = target
+        _needsSshConfiguration.value = false
+        sessionManager.cleanup()
+        coroutineScope.launch {
+            runCatching { terminalProvider?.disconnect() }.onFailure { error ->
+                Log.e(TAG, "Failed to disconnect previous terminal provider", error)
+            }
+            terminalProvider = null
+        }
+    }
+
+    /**
+     * 用户已知晓缺少主机配置，收起引导。
+     */
+    fun dismissSshConfigurationRequest() {
+        _needsSshConfiguration.value = false
+    }
+
+    /**
+     * 已知主机条目，供设置页展示。
+     */
+    fun knownHostKeys(): List<HostKeyStore.Entry> = sshFileConnectionManager.knownHostKeys()
+
+    /**
+     * 忘记某个主机的全部密钥，下次连接会重新询问。
+     */
+    fun forgetHostKeys(host: String) = sshFileConnectionManager.forgetHostKeys(host)
 
     suspend fun initializeEnvironment(): Boolean {
         if (isEnvInitialized) {
@@ -1259,28 +1410,14 @@ $prootBindSetup
         }
         """.trimIndent()
 
-        val sshShell = """
-        ssh_shell(){
-          set -x
-          install_ubuntu
-          configure_sources
-          fix_permissions
-          sleep 1
-          bump_progress
-          
-          # 先进入Ubuntu环境，然后连接SSH
-          # 当SSH退出时，用户会回到本地Ubuntu shell
-          login_ubuntu 'echo "Connecting to SSH..."; '"${'$'}SSH_COMMAND"'; echo "SSH connection closed. You are now in local Ubuntu terminal."; /bin/bash -il'
-        }
-        """.trimIndent()
-
+        // 交互式 SSH 会话已改为直接使用 SSH shell 通道，
+        // 生成脚本里不再需要曾经在 proot 内执行 ssh 客户端的 ssh_shell。
         return """
         $common
         $installUbuntu
         $configureSources
         $fixPermissions
         $loginUbuntu
-        $sshShell
         clear_lines
         start_shell(){
           install_ubuntu
@@ -1305,7 +1442,7 @@ $prootBindSetup
         }
 
         activeSessions[sessionId]?.let { session ->
-            session.process.destroy()
+            session.transport.destroy()
             activeSessions.remove(sessionId)
             Log.d(TAG, "Closed and removed session: $sessionId")
         }
@@ -1367,14 +1504,19 @@ $prootBindSetup
         executorKey: String = "default",
         timeoutMs: Long = 120000L
     ): HiddenExecResult {
-        val initialized = initializeEnvironment()
-        if (!initialized) {
-            return HiddenExecResult(
-                output = "",
-                exitCode = -1,
-                state = HiddenExecResult.State.SHELL_START_FAILED,
-                error = "Terminal environment initialization failed"
-            )
+        // 隐藏执行在远端目标下走 SSH exec 通道，不需要本地环境：这里若照旧解压 rootfs，
+        // 远端用户第一次执行工具命令就会付出几十兆解包与 common.sh 生成的代价，
+        // 而这些文件在远端目标下一个都不会被用到。
+        if (_activeTarget.value == TerminalTarget.LOCAL) {
+            val initialized = initializeEnvironment()
+            if (!initialized) {
+                return HiddenExecResult(
+                    output = "",
+                    exitCode = -1,
+                    state = HiddenExecResult.State.SHELL_START_FAILED,
+                    error = "Terminal environment initialization failed"
+                )
+            }
         }
 
         return getTerminalProvider().executeHiddenCommand(

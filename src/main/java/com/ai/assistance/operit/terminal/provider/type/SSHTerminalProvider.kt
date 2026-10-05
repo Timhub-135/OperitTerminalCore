@@ -2,22 +2,22 @@ package com.ai.assistance.operit.terminal.provider.type
 
 import android.content.Context
 import android.util.Log
-import com.ai.assistance.operit.terminal.Pty
 import com.ai.assistance.operit.terminal.TerminalManager
 import com.ai.assistance.operit.terminal.TerminalSession
-import com.ai.assistance.operit.terminal.data.SSHAuthType
 import com.ai.assistance.operit.terminal.data.SSHConfig
 import com.ai.assistance.operit.terminal.provider.filesystem.FileSystemProvider
+import com.ai.assistance.operit.terminal.transport.SshChannelPty
+import com.ai.assistance.operit.terminal.transport.SshChannelTransport
 import com.ai.assistance.operit.terminal.utils.SSHFileConnectionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * SSH 远程终端提供者
- * 
- * 通过启动一个本地终端，然后自动执行ssh命令来连接到远程服务器
+ *
+ * 终端会话建立在 SSH shell 通道上：本地不启动 proot，也不需要 Ubuntu 内的
+ * ssh 客户端与 sshpass。文件系统、隐藏执行与端口转发仍由连接管理器承担。
  */
 class SSHTerminalProvider(
     private val context: Context,
@@ -35,6 +35,22 @@ class SSHTerminalProvider(
     
     companion object {
         private const val TAG = "SSHTerminalProvider"
+
+        /**
+         * 打开通道时必须给出的初始 PTY 尺寸。
+         * SSH 的 pty-req 要求带尺寸，视图首次布局后会通过 window-change 修正。
+         */
+        private const val DEFAULT_PTY_COLS = 80
+        private const val DEFAULT_PTY_ROWS = 24
+
+        /**
+         * OutputProcessor 的会话状态机按 LOGIN_SUCCESSFUL → TERMINAL_READY → 首个提示符
+         * 三段信号把会话推进到 READY。本地 proot 由 common.sh 里的 start_shell 打印这两个
+         * 标记；SSH 通道对面是一台普通 sshd，没有等价脚本，必须在通道刚打开时主动握手，
+         * 否则 createNewSession 会一直等满 30 秒并抛出 "Session initialization timeout"。
+         */
+        private const val LOGIN_MARKER = "LOGIN_SUCCESSFUL"
+        private const val READY_MARKER = "TERMINAL_READY"
     }
     
     override suspend fun isConnected(): Boolean {
@@ -104,44 +120,56 @@ class SSHTerminalProvider(
         }
     }
     
-    override suspend fun startSession(sessionId: String): Result<Pair<TerminalSession, Pty>> {
-        return withContext<Result<Pair<TerminalSession, Pty>>>(Dispatchers.IO) {
+    override suspend fun startSession(sessionId: String): Result<TerminalSession> {
+        return withContext<Result<TerminalSession>>(Dispatchers.IO) {
             try {
                 // 确保SSH连接已建立
                 if (!isConnected()) {
                     connect().getOrThrow()
                 }
 
-                val filesDir: File = context.filesDir
-                val binDir: File = File(filesDir, "usr/bin")
-                val bash = File(binDir, "bash").absolutePath
-                val startScript = "source \$HOME/common.sh && ssh_shell"
-                val command = arrayOf(bash, "-c", startScript)
-                
-                val env = buildEnvironment()
-                
-                Log.d(TAG, "Starting local terminal session for SSH with command: ${command.joinToString(" ")}")
-                Log.d(TAG, "Environment: $env")
-                
-                val pty = Pty.start(command, env, filesDir)
-                
+                val connectionId = sshConnectionId
+                    ?: return@withContext Result.failure(
+                        IllegalStateException("SSH connection id is missing after connect")
+                    )
+
+                val shell = sshFileManager
+                    .openShellChannel(connectionId, cols = DEFAULT_PTY_COLS, rows = DEFAULT_PTY_ROWS)
+                    .getOrThrow()
+
+                // 交互式会话直接对接 shell 通道：本地不启动 proot，也不需要
+                // Ubuntu 内的 ssh 客户端与 sshpass。初始尺寸由协议要求给出，
+                // 视图首次布局后会通过 window-change 修正。
+                val pty = SshChannelPty(
+                    channel = shell.channel,
+                    stdout = shell.stdout,
+                    stdin = shell.stdin
+                ) { shell.stdout.available() }
                 val terminalSession = TerminalSession(
-                    process = pty.process,
-                    stdout = pty.stdout,
-                    stdin = pty.stdin
+                    SshChannelTransport(
+                        channel = shell.channel,
+                        stdout = shell.stdout,
+                        stdin = shell.stdin,
+                        pty = pty
+                    )
                 )
-                
+
                 activeSessions[sessionId] = terminalSession
-                
+
+                // 通道建立后立刻补上本地 proot 脚本承担的那次握手：
+                // 远端 shell 执行完这两次 echo 后会重新打印提示符，状态机据此进入 READY。
+                shell.stdin.write(
+                    "echo $LOGIN_MARKER; echo $READY_MARKER\n".toByteArray(Charsets.UTF_8)
+                )
+                shell.stdin.flush()
+
                 // 如果启用了反向隧道，挂载存储（通过管理器）
                 if (sshConfig.enableReverseTunnel) {
-                    sshConnectionId?.let { id ->
-                        sshFileManager.mountStorage(id)
-                    }
+                    sshFileManager.mountStorage(connectionId)
                 }
-                
-                Log.d(TAG, "SSH terminal session started via local pty: $sessionId")
-                Result.success(Pair(terminalSession, pty))
+
+                Log.d(TAG, "SSH terminal session started on shell channel: $sessionId")
+                Result.success(terminalSession)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start SSH terminal session", e)
                 Result.failure(e)
@@ -151,7 +179,7 @@ class SSHTerminalProvider(
     
     override suspend fun closeSession(sessionId: String) {
         activeSessions[sessionId]?.let { session ->
-            session.process.destroy()
+            session.transport.destroy()
             activeSessions.remove(sessionId)
             Log.d(TAG, "Closed SSH terminal session (process): $sessionId")
         }
@@ -203,59 +231,5 @@ class SSHTerminalProvider(
             "TERM" to "xterm-256color",
             "LANG" to "en_US.UTF-8"
         )
-    }
-
-    private fun buildSshCommand(): String {
-        val cmd = StringBuilder()
-        
-        // 如果是密码认证，使用sshpass自动输入密码
-        if (sshConfig.authType == SSHAuthType.PASSWORD && sshConfig.password != null) {
-            cmd.append("sshpass -p '${sshConfig.password}' ")
-        }
-        
-        cmd.append("ssh")
-        cmd.append(" -p ${sshConfig.port}")
-        
-        // 注意：反向隧道现在通过JSch Session API配置（setupReverseTunnel），不再需要ssh命令参数
-        
-        if (sshConfig.authType == SSHAuthType.PUBLIC_KEY && sshConfig.privateKeyPath != null) {
-            // 注意：这里的路径是Android文件系统中的路径。
-            // proot已将/storage/emulated/0挂载为/sdcard，因此如果密钥在外部存储中，路径需要相应调整。
-            // 为简单起见，我们假设用户提供的路径在proot环境中是可访问的。
-            cmd.append(" -i \"${sshConfig.privateKeyPath}\"")
-        }
-        
-        cmd.append(" -o StrictHostKeyChecking=no") // 避免首次连接时的主机密钥检查提示
-        
-        // 配置心跳包（Keep-Alive）
-        if (sshConfig.enableKeepAlive) {
-            cmd.append(" -o ServerAliveInterval=${sshConfig.keepAliveInterval}")
-            cmd.append(" -o ServerAliveCountMax=3")
-        }
-        
-        cmd.append(" ${sshConfig.username}@${sshConfig.host}")
-
-        return cmd.toString()
-    }
-
-    private fun buildEnvironment(): Map<String, String> {
-        val filesDir: File = context.filesDir
-        val usrDir: File = File(filesDir, "usr")
-        val binDir: File = File(usrDir, "bin")
-        val nativeLibDir: String = context.applicationInfo.nativeLibraryDir
-        
-        val env = mutableMapOf<String, String>()
-        env["PATH"] = "${binDir.absolutePath}:${System.getenv("PATH")}"
-        env["HOME"] = filesDir.absolutePath
-        env["PREFIX"] = usrDir.absolutePath
-        env["TERMUX_PREFIX"] = usrDir.absolutePath
-        env["LD_LIBRARY_PATH"] = "${nativeLibDir}:${binDir.absolutePath}"
-        env["PROOT_LOADER"] = File(binDir, "loader").absolutePath
-        env["TMPDIR"] = File(filesDir, "tmp").absolutePath
-        env["PROOT_TMP_DIR"] = File(filesDir, "tmp").absolutePath
-        env["TERM"] = "xterm-256color"
-        env["LANG"] = "en_US.UTF-8"
-        env["SSH_COMMAND"] = buildSshCommand()
-        return env
     }
 }

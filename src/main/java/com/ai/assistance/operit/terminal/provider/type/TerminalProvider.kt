@@ -1,6 +1,5 @@
 package com.ai.assistance.operit.terminal.provider.type
 
-import com.ai.assistance.operit.terminal.Pty
 import com.ai.assistance.operit.terminal.TerminalSession
 import com.ai.assistance.operit.terminal.provider.filesystem.FileSystemProvider
 
@@ -53,9 +52,9 @@ interface TerminalProvider {
      * 启动终端会话
      * 
      * @param sessionId 会话ID
-     * @return 终端会话和PTY的配对
+     * @return 终端会话，I/O 与生命周期由会话自带的传输提供
      */
-    suspend fun startSession(sessionId: String): Result<Pair<TerminalSession, Pty>>
+    suspend fun startSession(sessionId: String): Result<TerminalSession>
     
     /**
      * 关闭终端会话

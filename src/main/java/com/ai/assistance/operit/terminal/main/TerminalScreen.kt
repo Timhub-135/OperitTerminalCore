@@ -43,6 +43,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.ai.assistance.operit.terminal.TerminalEnv
 import com.ai.assistance.operit.terminal.TerminalManager
+import com.ai.assistance.operit.terminal.data.TerminalTarget
 import com.ai.assistance.operit.terminal.ui.SetupScreen
 import com.ai.assistance.operit.terminal.ui.TerminalHome
 import com.ai.assistance.operit.terminal.ui.SettingsScreen
@@ -88,11 +89,16 @@ fun TerminalScreen(
     LaunchedEffect(Unit) {
         val sharedPreferences = context.getSharedPreferences("terminal_prefs", Context.MODE_PRIVATE)
         val isFirstLaunch = sharedPreferences.getBoolean("is_first_launch", true)
-        startDestination = when {
-            env.forceShowSetup -> TerminalRoutes.SETUP_ROUTE
-            isFirstLaunch -> TerminalRoutes.SETUP_ROUTE
-            else -> TerminalRoutes.TERMINAL_HOME_ROUTE
-        }
+        startDestination =
+            when {
+                env.forceShowSetup -> TerminalRoutes.SETUP_ROUTE
+                // 环境安装向导面向本地 proot 环境（Node.js、Python、SSH 工具等）。
+                // 远端目标用不到它：直接进终端首页，缺少主机配置时由首页给出添加主机的引导，
+                // 否则新用户第一眼看到的是装本地环境，与默认目标自相矛盾。
+                isFirstLaunch && env.activeTarget == TerminalTarget.LOCAL ->
+                    TerminalRoutes.SETUP_ROUTE
+                else -> TerminalRoutes.TERMINAL_HOME_ROUTE
+            }
         
         if (checkUpdatesOnEnter) {
             coroutineScope.launch {

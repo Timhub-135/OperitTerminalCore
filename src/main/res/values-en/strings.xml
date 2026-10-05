@@ -28,8 +28,6 @@
     <string name="category_rust_desc">Rust development environment and package manager</string>
     <string name="category_go_name">Go Environment</string>
     <string name="category_go_desc">Go programming language environment</string>
-    <string name="category_ssh_name">SSH Tools</string>
-    <string name="category_ssh_desc">SSH client and password authentication tools</string>
     
     <!-- Package Items -->
     <string name="package_nodejs_name">Node.js</string>
@@ -52,10 +50,6 @@
     <string name="package_rust_desc">Install Rust toolchain via rustup</string>
     <string name="package_go_name">Go</string>
     <string name="package_go_desc">Go programming language</string>
-    <string name="package_ssh_client_name">SSH Client</string>
-    <string name="package_ssh_client_desc">SSH connection client</string>
-    <string name="package_sshpass_name">sshpass</string>
-    <string name="package_sshpass_desc">SSH password authentication tool</string>
     
     <!-- SettingsScreen -->
     <string name="settings_title">Settings</string>
@@ -137,11 +131,33 @@
     <string name="ftp_server_running_info">FTP Server Running\nAddress: %1$s:%2$s\nUsername: %3$s\nPassword: %4$s\nRoot Directory: Ubuntu File System</string>
     <string name="unknown_session">Unknown Session</string>
     
-    <!-- SSH Tools Check -->
-    <string name="ssh_tools_missing_title">SSH Tools Not Installed</string>
-    <string name="ssh_tools_missing_message">Enabling SSH connection requires the following tools:\n\n• ssh - SSH client\n• sshpass - SSH password authentication tool\n\n Please go to the "Environment Setup" page to install SSH tools.</string>
+    <!-- SSH Configuration Check -->
+    <string name="ssh_config_missing_title">SSH Not Configured</string>
+    <string name="ssh_config_missing_message">Fill in host, port and authentication before enabling SSH. Terminal sessions run directly on the SSH channel, so ssh and sshpass inside the local environment are no longer required.</string>
     <string name="go_to_setup">Go to Setup</string>
-    <string name="checking_ssh_tools">Checking SSH tools...</string>
+
+    <!-- SSH Host Key Confirmation -->
+    <string name="host_key_unknown_title">Confirm Host Key</string>
+    <string name="host_key_unknown_message">First connection to this host. Compare the fingerprint below with the output of ssh-keygen -lf on the server before trusting it.</string>
+    <string name="host_key_mismatch_title">Host Key Changed</string>
+    <string name="host_key_mismatch_message">A different key was recorded for this host earlier, and the fingerprint no longer matches. This can mean the server was reinstalled, or that someone is intercepting the connection; verify with the server administrator first.</string>
+    <string name="host_key_fingerprint_label">SHA-256 fingerprint</string>
+    <string name="host_key_trust">Trust and continue</string>
+
+    <!-- Terminal Target Selection -->
+    <string name="terminal_target_title">Execution Target</string>
+    <string name="terminal_target_desc">Where commands run. A remote SSH host moves the work onto a real Linux machine; the local environment runs through proot and is markedly slower.</string>
+    <string name="terminal_target_remote">Remote SSH host</string>
+    <string name="terminal_target_remote_desc">Sessions run directly on an SSH channel; host and authentication must be filled in first</string>
+    <string name="terminal_target_local">Local Ubuntu environment</string>
+    <string name="terminal_target_local_desc">No network needed, but every command goes through proot and heavy work is slow</string>
+    <string name="terminal_target_selected">Currently in use</string>
+
+    <!-- Known Hosts -->
+    <string name="known_hosts_title">Known Host Keys</string>
+    <string name="known_hosts_summary">%1$d trusted hosts; inspect fingerprints or forget them</string>
+    <string name="known_hosts_empty">No host trusted yet. The app shows the fingerprint and asks for confirmation on first connection.</string>
+    <string name="known_hosts_forget">Forget this host</string>
     
     <!-- Shared TMP Settings -->
     <string name="shared_tmp_title">Shared Temporary Directory</string>
@@ -171,15 +187,6 @@
     <string name="ssh_reverse_mount_enabled"> Reverse Mount Enabled</string>
     <string name="ssh_reverse_mount_desc">Remote can access local files via ~/storage and ~/sdcard</string>
     <string name="ssh_config_required">Please configure SSH connection first</string>
-    <string name="openssh_missing_title">OpenSSH Server Missing</string>
-    <string name="openssh_missing_desc">Enabling reverse mount requires the following components:</string>
-    <string name="openssh_local_component">✓ Local (Android): openssh-server</string>
-    <string name="openssh_go_to_install">  → Go to Environment Setup to install</string>
-    <string name="openssh_remote_component">✓ Remote Server: sshfs</string>
-    <string name="openssh_remote_install">  → Execute on remote server:</string>
-    <string name="openssh_install_ubuntu_cmd">     apt install sshfs  # Ubuntu/Debian</string>
-    <string name="openssh_install_centos_cmd">     yum install fuse-sshfs  # CentOS/RHEL</string>
-    <string name="openssh_install_button">Install openssh-server</string>
     
     <!-- Font Settings -->
     <string name="font_settings_title">Terminal Font Settings</string>

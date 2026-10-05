@@ -11,15 +11,17 @@ import com.ai.assistance.operit.terminal.data.MirrorSource
 import com.ai.assistance.operit.terminal.data.PackageManagerType
 import com.ai.assistance.operit.terminal.data.SourceConfig
 import com.ai.assistance.operit.terminal.data.SSHConfig
+import com.ai.assistance.operit.terminal.data.TerminalTarget
+import com.ai.assistance.operit.terminal.utils.HostKeyStore
 import com.ai.assistance.operit.terminal.utils.SourceManager
 import com.ai.assistance.operit.terminal.utils.SSHConfigManager
 import com.ai.assistance.operit.terminal.utils.VirtualKeyboardConfigManager
 import com.ai.assistance.operit.terminal.utils.VirtualKeyboardLayoutConfig
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
-import java.io.File
 
 class SettingsViewModel(
     application: Application,
@@ -76,11 +78,34 @@ class SettingsViewModel(
     private val _sshEnabled = MutableStateFlow(false)
     val sshEnabled = _sshEnabled.asStateFlow()
 
-    private val _showSshToolsMissingDialog = MutableStateFlow(false)
-    val showSshToolsMissingDialog = _showSshToolsMissingDialog.asStateFlow()
-    
-    private val _showOpensshMissingDialog = MutableStateFlow(false)
-    val showOpensshMissingDialog = _showOpensshMissingDialog.asStateFlow()
+    /** 当前执行目标，设置页据此展示与切换 */
+    val activeTarget: StateFlow<TerminalTarget> = terminalManagerRef.activeTarget
+
+    /** 已知主机密钥条目，设置页可查看与忘记 */
+    private val _knownHosts = MutableStateFlow<List<HostKeyStore.Entry>>(emptyList())
+    val knownHosts = _knownHosts.asStateFlow()
+
+    fun setActiveTarget(target: TerminalTarget) {
+        // 选择远端就表示要使用这份主机配置：否则会出现“目标已是远端、SSH 开关却是关”
+        // 的矛盾状态，会话只会报缺少配置。
+        if (target == TerminalTarget.REMOTE && _sshConfig.value != null && !sshConfigManager.isEnabled()) {
+            sshConfigManager.setEnabled(true)
+            loadSSHEnabled()
+        }
+        terminalManagerRef.setActiveTarget(target)
+    }
+
+    fun refreshKnownHosts() {
+        _knownHosts.value = terminalManagerRef.knownHostKeys()
+    }
+
+    fun forgetHostKeys(host: String) {
+        terminalManagerRef.forgetHostKeys(host)
+        refreshKnownHosts()
+    }
+
+    private val _showSshConfigMissingDialog = MutableStateFlow(false)
+    val showSshConfigMissingDialog = _showSshConfigMissingDialog.asStateFlow()
     
     // Shared tmp setting state
     private val _sharedTmpEnabled = MutableStateFlow(true)
@@ -118,29 +143,8 @@ class SettingsViewModel(
         loadVirtualKeyboardLayout()
     }
 
-    fun onSshToolsMissingDialogDismissed() {
-        _showSshToolsMissingDialog.value = false
-    }
-    
-    fun onOpensshMissingDialogDismissed() {
-        _showOpensshMissingDialog.value = false
-    }
-
-    private fun areSshToolsInstalled(): Boolean {
-        val filesDir = getApplication<Application>().filesDir
-        val ubuntuRoot = File(filesDir, "usr/var/lib/proot-distro/installed-rootfs/ubuntu")
-        
-        val sshExecutable = File(ubuntuRoot, "usr/bin/ssh")
-        val sshpassExecutable = File(ubuntuRoot, "usr/bin/sshpass")
-        
-        return sshExecutable.exists() && sshpassExecutable.exists()
-    }
-    
-    private fun isOpensshServerInstalled(): Boolean {
-        val filesDir = getApplication<Application>().filesDir
-        val ubuntuRoot = File(filesDir, "usr/var/lib/proot-distro/installed-rootfs/ubuntu")
-        val sshdExecutable = File(ubuntuRoot, "usr/sbin/sshd")
-        return sshdExecutable.exists()
+    fun onSshConfigMissingDialogDismissed() {
+        _showSshConfigMissingDialog.value = false
     }
 
     private fun loadSourceConfigs() {
@@ -386,15 +390,11 @@ class SettingsViewModel(
     
     fun setSSHEnabled(enabled: Boolean) {
         if (enabled) {
-            if (!areSshToolsInstalled()) {
-                _showSshToolsMissingDialog.value = true
-                return
-            }
-            
-            // 检查是否启用了反向隧道且是否安装了openssh-server
-            val config = _sshConfig.value
-            if (config != null && config.enableReverseTunnel && !isOpensshServerInstalled()) {
-                _showOpensshMissingDialog.value = true
+            // 启用 SSH 只依赖一份连接配置：交互式会话走 SSH shell 通道，
+            // 反向隧道使用应用内自带的 SSHD 服务，两者都不再需要本地环境里的
+            // ssh、sshpass 或 openssh-server。
+            if (_sshConfig.value == null) {
+                _showSshConfigMissingDialog.value = true
                 return
             }
             

@@ -15,7 +15,9 @@ data class SSHConfig(
     val enableReverseTunnel: Boolean = false,
     val remoteTunnelPort: Int = 8881,
     val localSshPort: Int = 2223,  // 本地SSHD服务器端口
-    val localSshPassword: String = "3688368398",
+    // 手机侧 SSHD 的口令：由 SSHConfigManager 每安装随机生成并加密保存，
+    // 不留任何硬编码默认值 —— 全设备相同的口令等于没有口令。
+    val localSshPassword: String = "",
     // 本地端口转发配置（用于MCP Bridge）
     val localSshUsername: String = "android",
     val enablePortForwarding: Boolean = true,

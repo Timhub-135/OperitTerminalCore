@@ -6,6 +6,7 @@ import com.ai.assistance.operit.terminal.data.SSHAuthType
 import com.ai.assistance.operit.terminal.data.SSHConfig
 import com.ai.assistance.operit.terminal.provider.filesystem.SSHFileSystemProvider
 import com.ai.assistance.operit.terminal.provider.type.HiddenExecResult
+import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import kotlinx.coroutines.delay
@@ -14,6 +15,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
 
@@ -31,6 +34,9 @@ class SSHFileConnectionManager private constructor(private val context: Context)
     
     companion object {
         private const val TAG = "SSHFileConnManager"
+
+        /** shell 通道建立超时，与命令执行的默认超时区分开 */
+        private const val SHELL_CHANNEL_CONNECT_TIMEOUT_MS = 30_000
         
         @Volatile
         private var INSTANCE: SSHFileConnectionManager? = null
@@ -45,6 +51,9 @@ class SSHFileConnectionManager private constructor(private val context: Context)
     }
     
     private val jsch = JSch()
+
+    // 主机密钥存储：known_hosts 写到应用私有目录，校验失败时给出带指纹的挑战
+    private val hostKeyStore = HostKeyStore(context.applicationContext)
     
     // 连接池：<连接ID, 连接信息>
     private val connections = ConcurrentHashMap<String, SSHConnection>()
@@ -93,8 +102,10 @@ class SSHFileConnectionManager private constructor(private val context: Context)
         val enableReverseTunnel: Boolean = false,
         val remoteTunnelPort: Int = 2222,
         val localSshPort: Int = 2222,
-        val localSshUsername: String = "ubuntu",
-        val localSshPassword: String = "ubuntu"
+        val localSshUsername: String = "android",
+        // 手机侧 SSHD 口令必须由配置提供（SSHConfigManager 每安装随机生成），
+        // 不留 "ubuntu" 这类弱默认值：默认值会被当成真实口令用于反向隧道认证。
+        val localSshPassword: String
     ) {
         /**
          * 转换为SSHConfig
@@ -174,7 +185,10 @@ class SSHFileConnectionManager private constructor(private val context: Context)
                     
                     // 配置会话
                     val sessionConfig = Properties()
-                    sessionConfig["StrictHostKeyChecking"] = "no"
+                    // 主机密钥必须校验：未知主机返回挑战，指纹变化直接中断连接。
+                    // 这里不能再用 "no"，那等于接受任何自称目标服务器的主机。
+                    sessionConfig["StrictHostKeyChecking"] = "yes"
+                    jsch.setHostKeyRepository(hostKeyStore)
 
                     // 配置心跳包（Keep-Alive）
                     if (config.enableKeepAlive) {
@@ -226,8 +240,16 @@ class SSHFileConnectionManager private constructor(private val context: Context)
                     Log.d(TAG, "SSH connection established: $connectionId")
                     Result.success(connectionId)
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to connect SSH", e)
-                    Result.failure(e)
+                    // 主机密钥被拒时 check() 已记录挑战，这里换成带指纹的类型化异常，
+                    // 交给 UI 展示并让用户显式信任；其他失败按原样返回。
+                    val challenge = hostKeyStore.consumeRejected()
+                    if (challenge != null) {
+                        Log.w(TAG, "SSH host key rejected: ${challenge.host} ${challenge.fingerprintSha256}")
+                        Result.failure(HostKeyVerificationException(challenge))
+                    } else {
+                        Log.e(TAG, "Failed to connect SSH", e)
+                        Result.failure(e)
+                    }
                 }
             }
         }
@@ -429,6 +451,74 @@ class SSHFileConnectionManager private constructor(private val context: Context)
                 Result.failure(Exception("SSH command loop terminated unexpectedly"))
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to execute SSH command", e)
+                Result.failure(e)
+            }
+        }
+    }
+
+    /**
+     * 交互式 shell 通道及其数据流。
+     *
+     * JSch 要求输入输出流在 connect() 之前取好：连接后再调用 getInputStream()
+     * 只会拿到一条 “should be called before connect()” 的告警，数据通路也不再按预期建立。
+     * 因此建通道时一并捕获三个对象，交给终端传输使用。
+     */
+    data class ShellChannel(
+        val channel: ChannelShell,
+        val stdout: InputStream,
+        val stdin: OutputStream
+    )
+
+    /**
+     * 信任一个主机密钥。
+     *
+     * 只在用户看过指纹并确认后调用；随后重新发起连接即可通过校验。
+     */
+    fun trustHostKey(challenge: HostKeyChallenge) = hostKeyStore.trust(challenge)
+
+    /**
+     * 列出已知主机密钥条目，供设置页展示与清理。
+     */
+    fun knownHostKeys(): List<HostKeyStore.Entry> = hostKeyStore.knownEntries()
+
+    /**
+     * 忘记某个主机的全部密钥，下次连接会重新询问。
+     */
+    fun forgetHostKeys(host: String) = hostKeyStore.forget(host)
+
+    /**
+     * 打开一个带 PTY 的交互式 shell 通道。
+     *
+     * 终端会话直接使用该通道的 I/O。此前交互式 SSH 要先起本地 proot、再在 Ubuntu 里
+     * 执行 ssh 客户端，既要求用户 apt 安装 ssh 与 sshpass，又让每次按键都穿过 proot；
+     * 通道直连后这两条依赖都不再存在。
+     *
+     * @param connectionId 连接 ID，缺省使用当前活跃连接
+     * @param cols 终端列数
+     * @param rows 终端行数
+     */
+    suspend fun openShellChannel(
+        connectionId: String? = null,
+        cols: Int,
+        rows: Int
+    ): Result<ShellChannel> {
+        return withContext(Dispatchers.IO) {
+            val id = connectionId ?: currentConnectionId
+                ?: return@withContext Result.failure(Exception("No active SSH connection"))
+            val connection = connections[id]
+                ?: return@withContext Result.failure(Exception("Connection not found: $id"))
+
+            try {
+                val channel = connection.session.openChannel("shell") as ChannelShell
+                channel.setPtyType("xterm-256color")
+                channel.setPtySize(cols, rows, 0, 0)
+                val stdout = channel.inputStream
+                val stdin = channel.outputStream
+                channel.connect(SHELL_CHANNEL_CONNECT_TIMEOUT_MS)
+                Log.d(TAG, "Opened shell channel on $id with ${cols}x${rows} PTY")
+                Result.success(ShellChannel(channel = channel, stdout = stdout, stdin = stdin))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to open shell channel on $id", e)
                 Result.failure(e)
             }
         }

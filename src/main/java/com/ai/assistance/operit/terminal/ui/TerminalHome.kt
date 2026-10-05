@@ -502,6 +502,113 @@ fun TerminalHome(
         }
     }
 
+    // 远端目标尚未配置主机：引导去填写，而不是悄悄落到本地环境
+    if (env.needsSshConfiguration) {
+        val context = LocalContext.current
+        AlertDialog(
+            onDismissRequest = { env.onDismissSshConfigurationRequest() },
+            title = {
+                Text(
+                    text = context.getString(com.ai.assistance.operit.terminal.R.string.terminal_target_remote),
+                    color = Color.White
+                )
+            },
+            text = {
+                Text(
+                    text = context.getString(com.ai.assistance.operit.terminal.R.string.ssh_config_missing_message),
+                    color = Color.Gray
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        env.onDismissSshConfigurationRequest()
+                        onNavigateToSettings()
+                    }
+                ) {
+                    Text(
+                        text = context.getString(com.ai.assistance.operit.terminal.R.string.go_to_setup),
+                        color = Color.White
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { env.onDismissSshConfigurationRequest() }) {
+                    Text(
+                        text = context.getString(com.ai.assistance.operit.terminal.R.string.dialog_cancel),
+                        color = Color.Gray
+                    )
+                }
+            }
+        )
+    }
+
+    // 主机密钥确认弹窗：未知主机与指纹变化都要用户看过指纹再决定
+    env.pendingHostKey?.let { pending ->
+        val context = LocalContext.current
+        val challenge = pending.challenge
+
+        AlertDialog(
+            onDismissRequest = { env.onDismissPendingHostKey() },
+            title = {
+                Text(
+                    text = context.getString(
+                        if (pending.isMismatch) {
+                            com.ai.assistance.operit.terminal.R.string.host_key_mismatch_title
+                        } else {
+                            com.ai.assistance.operit.terminal.R.string.host_key_unknown_title
+                        }
+                    ),
+                    color = Color.White
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        text = context.getString(
+                            if (pending.isMismatch) {
+                                com.ai.assistance.operit.terminal.R.string.host_key_mismatch_message
+                            } else {
+                                com.ai.assistance.operit.terminal.R.string.host_key_unknown_message
+                            }
+                        ),
+                        color = Color.Gray
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(text = "${challenge.host} (${challenge.keyType})", color = Color.White)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = context.getString(
+                            com.ai.assistance.operit.terminal.R.string.host_key_fingerprint_label
+                        ),
+                        color = Color.Gray
+                    )
+                    Text(
+                        text = challenge.fingerprintSha256,
+                        color = Color.White,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { env.onTrustPendingHostKey() }) {
+                    Text(
+                        text = context.getString(com.ai.assistance.operit.terminal.R.string.host_key_trust),
+                        color = if (pending.isMismatch) Color.Red else Color.White
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { env.onDismissPendingHostKey() }) {
+                    Text(
+                        text = context.getString(com.ai.assistance.operit.terminal.R.string.dialog_cancel),
+                        color = Color.Gray
+                    )
+                }
+            }
+        )
+    }
+
     // 删除确认弹窗
     if (showDeleteConfirmDialog && sessionToDelete != null) {
         val context = LocalContext.current

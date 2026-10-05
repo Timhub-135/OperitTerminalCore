@@ -19,6 +19,13 @@ The `terminal-core` module is responsible for the following core tasks:
 
 -   **AIDL Interface (`ITerminalService.aidl`, `ITerminalCallback.aidl`)**: Defines the contract for communication between the `TerminalService` and its clients. This allows the UI to run in a separate process from the terminal engine, preventing the terminal session from being terminated if the UI is closed.
 
+-   **`transport.TerminalTransport`**: The provider-neutral contract for a session's I/O and lifetime (`stdout`, `stdin`, `pty`, `pid`, `isAlive`, `destroy`, `awaitExit`). `LocalPtyTransport` wraps a local PTY session and `SshChannelTransport` wraps an SSH shell channel, so the terminal core no longer depends on `java.lang.Process` and remote sessions are first-class. Sessions carry their `Pty` through the transport because the view needs it for window resizing and input-mode detection.
+
+## Terminal targets
+
+-   **Local (proot Ubuntu)**: `LocalTerminalProvider` starts a PTY and enters the bundled rootfs through `common.sh`.
+-   **Remote (SSH)**: `SSHTerminalProvider` opens a PTY-backed shell channel on the configured host and drives the terminal with the channel streams. No proot, no `ssh` client and no `sshpass` inside the local environment are involved; file system access, hidden execution and port forwarding still go through `SSHFileConnectionManager`.
+
 ## Technical Implementation
 
 -   **Architecture**: The module utilizes a reactive architecture, with Kotlin Flows at its core for state management and event propagation.

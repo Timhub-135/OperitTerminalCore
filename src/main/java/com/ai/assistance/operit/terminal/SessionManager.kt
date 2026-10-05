@@ -154,20 +154,6 @@ class SessionManager(private val terminalManager: TerminalManager) {
     }
     
     /**
-     * 清理会话资源
-     */
-     /*
-    private fun cleanupSession(session: TerminalSessionData) {
-        // 首先取消读取协程
-        session.readJob?.cancel()
-        
-        // 然后关闭流和进程
-        session.sessionWriter?.close()
-        session.terminalSession?.process?.destroy()
-    }
-    */
-    
-    /**
      * 清理所有会话
      */
     fun cleanup() {

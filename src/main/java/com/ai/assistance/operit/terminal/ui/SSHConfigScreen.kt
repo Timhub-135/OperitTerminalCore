@@ -229,7 +229,9 @@ fun SSHConfigEditDialog(
     var remoteTunnelPort by remember { mutableStateOf(config?.remoteTunnelPort?.toString() ?: "8881") }
     var localSshPort by remember { mutableStateOf(config?.localSshPort?.toString() ?: "2223") }
     var localSshUsername by remember { mutableStateOf(config?.localSshUsername ?: "android") }
-    var localSshPassword by remember { mutableStateOf(config?.localSshPassword ?: "3688368398") }
+    // 口令由 SSHConfigManager 每安装随机生成；已有配置时直接展示当前值，
+    // 留空表示“保存时由管理器生成新的随机口令”。
+    var localSshPassword by remember { mutableStateOf(config?.localSshPassword ?: "") }
     
     // 心跳包配置
     var enableKeepAlive by remember { mutableStateOf(config?.enableKeepAlive ?: true) }

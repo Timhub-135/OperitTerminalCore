@@ -98,8 +98,10 @@ dependencies {
     // Kotlin Serialization
     implementation(libs.kotlinx.serialization)
     
-    // SSH 依赖
-    implementation("com.jcraft:jsch:0.1.55")
+    // SSH 依赖：使用社区维护的 JSch 分支，包名仍是 com.jcraft.jsch。
+    // 0.1.55 不支持 ed25519、rsa-sha2-256/512、curve25519，对 OpenSSH 8.8+
+    // 默认关闭 ssh-rsa 的服务器直接握手失败。
+    implementation("com.github.mwiede:jsch:2.27.7")
     
     // FTP服务器依赖
     implementation("org.apache.ftpserver:ftpserver-core:1.2.0") {
