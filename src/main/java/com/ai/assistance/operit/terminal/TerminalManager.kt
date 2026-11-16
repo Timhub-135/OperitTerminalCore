@@ -932,6 +932,10 @@ EOF
             echo "<empty>"
           fi
           echo "--- proot stdout/stderr end ---"
+          echo "hint=PRoot could not start, so the local Ubuntu terminal cannot be used on this device."
+          echo "hint=On HarmonyOS NEXT or another strict-seccomp compatibility runtime, enable the HarmonyOS"
+          echo "hint=proot compatibility mode in terminal settings, restart the app and open a new session."
+          echo "hint=The SSH terminal also boots proot from this local session, so it cannot bypass this failure."
         }
         probe_proot_link2symlink(){
           run_proot_binary \
