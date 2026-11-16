@@ -75,7 +75,7 @@ open class Pty(
             val dummyProcess = PtyChildProcess(
                 pid = pid,
                 waitForExit = { Companion.waitFor(pid) },
-                sendSignal = { signal -> android.os.Process.sendSignal(pid, signal) }
+                sendSignal = { signal -> sendSignalToProcessGroup(pid, signal) }
             )
 
             return try {
@@ -96,6 +96,35 @@ open class Pty(
             if (error != 0) {
                 throw IOException("Failed to set PTY nonblocking mode", ErrnoException("fcntl", error))
             }
+        }
+
+        /**
+         * Signals the PTY child's process group instead of only the child pid.
+         *
+         * `forkpty` puts the child into a new session (`login_tty` -> `setsid`), so the child is a
+         * group leader and its process-group id equals [pid]. Signalling `-pid` also reaches
+         * children that outlived the SIGHUP produced by closing the PTY master, while a positive
+         * pid would only reach the leader and leave background children behind.
+         *
+         * Falls back to the positive pid when the group signal cannot be delivered (unknown pid,
+         * or the group no longer exists) so destruction never silently becomes a no-op. Both
+         * actions are injected so this policy stays unit-testable without a real PTY.
+         */
+        internal fun sendSignalToProcessGroup(
+            pid: Int,
+            signal: Int,
+            kill: (Int, Int) -> Unit = { target, sig -> android.system.Os.kill(target, sig) },
+            fallback: (Int, Int) -> Unit = { target, sig ->
+                android.os.Process.sendSignal(target, sig)
+            }
+        ) {
+            if (pid > 0) {
+                val deliveredToGroup = runCatching { kill(-pid, signal) }.isSuccess
+                if (deliveredToGroup) {
+                    return
+                }
+            }
+            runCatching { fallback(pid, signal) }
         }
 
         private external fun setNonBlocking(fd: Int): Int
